@@ -5,53 +5,13 @@ import {
 } from "@/lib/providers/market-data-error";
 import { getRequestMarketDataService } from "@/lib/services/market-data";
 import { AIResearchService } from "@/lib/services/ai-research-service";
+import { buildCompanyWithoutMarketData } from "@/lib/services/fundamentals-company";
 import { fundamentalsService } from "@/lib/services/fundamentals";
-import type { Company, CompanyMarketSnapshot, MarketPrice } from "@/lib/types/financial";
-import type { FundamentalsAnalysis } from "@/lib/types/fundamentals";
-import { getIndiaMarketStatus } from "@/lib/market-data/india-market-status";
+import type { CompanyMarketSnapshot, MarketPrice } from "@/lib/types/financial";
 
 const analysisService = new AIResearchService();
 const RATE_LIMIT_MS = 15_000;
 let lastRequestAt = 0;
-
-function unavailableCompany(
-  fundamentals: FundamentalsAnalysis,
-): Company {
-  const source = fundamentals.provenance[0];
-  const retrievedAt =
-    source?.retrievedAt ?? fundamentals.dataQuality.latestRetrievedAt;
-  if (!source || !retrievedAt) {
-    throw new Error("Verified company provenance is missing.");
-  }
-  return {
-    id: `fundamentals:${fundamentals.company.ticker}`,
-    ticker: fundamentals.company.ticker,
-    exchange: fundamentals.company.exchange,
-    name: fundamentals.company.companyName,
-    countryCode: "IN",
-    currency: "INR",
-    sector: null,
-    industry: null,
-    marketCap: null,
-    isActive: true,
-    provider: "unavailable",
-    instrument: fundamentals.company.ticker,
-    asOf: null,
-    marketTimestamp: null,
-    dataStatus: "UNAVAILABLE",
-    delaySeconds: null,
-    delayStatus: "UNKNOWN",
-    marketStatus: getIndiaMarketStatus(new Date(retrievedAt)).status,
-    isUnofficial: false,
-    licenseStatus: "UNKNOWN",
-    source: source.source,
-    sourceType: "official_filing",
-    sourceUrl: source.sourceUrl,
-    retrievedAt,
-    createdAt: retrievedAt,
-    updatedAt: retrievedAt,
-  };
-}
 
 function statusForGeminiError(error: GeminiProviderError): number {
   switch (error.failure) {
@@ -171,15 +131,16 @@ export async function POST(request: Request) {
     }
 
     const company = snapshot?.company ??
-      (fundamentals ? unavailableCompany(fundamentals) : null);
+      (fundamentals ? buildCompanyWithoutMarketData(fundamentals) : null);
     if (!company) {
       return Response.json(
         {
           status: "request_failed",
-          error: "Verified company information is unavailable.",
-          code: "company_data_unavailable",
+          error:
+            "Verified fundamentals are available, but the company currency or exchange identity is incomplete or inconsistent.",
+          code: "company_identity_unavailable",
         },
-        { status: 404 },
+        { status: 422, headers: { "Cache-Control": "no-store" } },
       );
     }
     let historicalPrices: MarketPrice[] = [];

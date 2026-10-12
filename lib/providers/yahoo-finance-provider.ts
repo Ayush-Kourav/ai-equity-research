@@ -10,6 +10,10 @@ import type {
 import type { MarketDataProvider } from "@/lib/providers/market-data-provider";
 import { MarketDataError } from "@/lib/providers/market-data-error";
 import { getIndiaMarketStatus } from "../market-data/india-market-status";
+import {
+  parseYahooHistoricalRows,
+  validateYahooQuote,
+} from "../market-data/yahoo-validation";
 
 const YAHOO_BASE_URL = "https://query1.finance.yahoo.com";
 const YAHOO_SOURCE = "Yahoo Finance (unofficial public endpoints)";
@@ -80,7 +84,10 @@ async function singleFlight<T>(
   return request;
 }
 
-function enqueueFetch(url: string): Promise<Response> {
+function enqueueFetch(
+  url: string,
+  fetcher: typeof fetch,
+): Promise<Response> {
   const request = requestQueue.then(async () => {
     const delay = Math.max(0, nextRequestAt - Date.now());
 
@@ -91,7 +98,7 @@ function enqueueFetch(url: string): Promise<Response> {
     nextRequestAt = Date.now() + 1000;
 
     try {
-      return await fetch(url, { signal: AbortSignal.timeout(8000) });
+      return await fetcher(url, { signal: AbortSignal.timeout(8000) });
     } catch (error) {
       if (error instanceof DOMException && error.name === "TimeoutError") {
         throw new MarketDataError(
@@ -114,8 +121,11 @@ function enqueueFetch(url: string): Promise<Response> {
   return request;
 }
 
-async function getJson(url: string): Promise<unknown> {
-  const response = await enqueueFetch(url);
+async function getJson(
+  url: string,
+  fetcher: typeof fetch,
+): Promise<unknown> {
+  const response = await enqueueFetch(url, fetcher);
 
   if (response.status === 429) {
     throw new MarketDataError(
@@ -234,6 +244,7 @@ function quoteFromChart(
   result: JsonRecord,
   companyId: string,
   symbol: string,
+  expectedCurrency: string,
   retrievedAt: string,
 ): MarketQuote {
   if (!isRecord(result.meta)) {
@@ -251,6 +262,20 @@ function quoteFromChart(
   const exchange =
     text(meta.fullExchangeName) ?? text(meta.exchangeName) ?? "NSE";
 
+  validateYahooQuote(
+    {
+      price,
+      previousClose,
+      timestamp,
+      currency,
+      open: meta.regularMarketOpen,
+      high: meta.regularMarketDayHigh,
+      low: meta.regularMarketDayLow,
+      volume: meta.regularMarketVolume,
+    },
+    symbol,
+    expectedCurrency,
+  );
   if (
     price === null ||
     previousClose === null ||
@@ -260,6 +285,7 @@ function quoteFromChart(
     throw new MarketDataError(
       `Yahoo Finance omitted required quote fields for ${symbol}.`,
       "malformed_response",
+      "yahoo",
     );
   }
 
@@ -280,7 +306,7 @@ function quoteFromChart(
     price,
     previousClose,
     change,
-    changePercent: previousClose === 0 ? 0 : (change / previousClose) * 100,
+    changePercent: (change / previousClose) * 100,
     dayHigh: finiteNumber(meta.regularMarketDayHigh),
     dayLow: finiteNumber(meta.regularMarketDayLow),
     volume: finiteNumber(meta.regularMarketVolume),
@@ -301,6 +327,11 @@ function quoteFromChart(
 
 export class YahooFinanceProvider implements MarketDataProvider {
   readonly id = "yahoo";
+  private readonly fetcher: typeof fetch;
+
+  constructor(fetcher: typeof fetch = fetch) {
+    this.fetcher = fetcher;
+  }
 
   async searchCompanies(query: string): Promise<Company[]> {
     const normalized = query.trim().toLocaleUpperCase();
@@ -347,7 +378,7 @@ export class YahooFinanceProvider implements MarketDataProvider {
         url.searchParams.set("quotesCount", "10");
         url.searchParams.set("newsCount", "0");
 
-        const payload = await getJson(url.toString());
+        const payload = await getJson(url.toString(), this.fetcher);
 
         if (!isRecord(payload) || !Array.isArray(payload.quotes)) {
           throw new MarketDataError(
@@ -388,11 +419,15 @@ export class YahooFinanceProvider implements MarketDataProvider {
         url.searchParams.set("range", "5d");
         url.searchParams.set("interval", "1d");
 
-        const result = chartResult(await getJson(url.toString()), company.ticker);
+        const result = chartResult(
+          await getJson(url.toString(), this.fetcher),
+          company.ticker,
+        );
         return quoteFromChart(
           result,
           company.id,
           company.ticker,
+          company.currency,
           new Date().toISOString(),
         );
       },
@@ -418,11 +453,15 @@ export class YahooFinanceProvider implements MarketDataProvider {
           url.searchParams.set("interval", "1d");
 
           const retrievedAt = new Date().toISOString();
-          const result = chartResult(await getJson(url.toString()), item.symbol);
+          const result = chartResult(
+            await getJson(url.toString(), this.fetcher),
+            item.symbol,
+          );
           const quote = quoteFromChart(
             result,
             item.symbol,
             item.symbol,
+            text(isRecord(result.meta) ? result.meta.currency : null) ?? "",
             retrievedAt,
           );
 
@@ -471,10 +510,14 @@ export class YahooFinanceProvider implements MarketDataProvider {
         url.searchParams.set("range", providerRange);
         url.searchParams.set("interval", "1d");
 
-        const result = chartResult(await getJson(url.toString()), company.ticker);
+        const result = chartResult(
+          await getJson(url.toString(), this.fetcher),
+          company.ticker,
+        );
 
         if (
           !Array.isArray(result.timestamp) ||
+          !isRecord(result.meta) ||
           !isRecord(result.indicators) ||
           !Array.isArray(result.indicators.quote) ||
           !isRecord(result.indicators.quote[0])
@@ -484,7 +527,6 @@ export class YahooFinanceProvider implements MarketDataProvider {
             "malformed_response",
           );
         }
-
         const timestamps = result.timestamp;
         const prices = result.indicators.quote[0];
         const adjustedClose =
@@ -500,45 +542,46 @@ export class YahooFinanceProvider implements MarketDataProvider {
         const closes = Array.isArray(prices.close) ? prices.close : [];
         const volumes = Array.isArray(prices.volume) ? prices.volume : [];
 
-        return timestamps.flatMap((timestamp, index) => {
-          const epoch = finiteNumber(timestamp);
-          const close = finiteNumber(closes[index]);
-
-          if (epoch === null || close === null) {
-            return [];
-          }
-
-          const asOf = new Date(epoch * 1000).toISOString();
-
-          return [
-            {
-              id: `${company.ticker}:${asOf}`,
-              companyId: company.id,
-              date: asOf.slice(0, 10),
-              asOf,
-              marketTimestamp: asOf,
-              instrument: company.ticker,
-              exchange: company.exchange,
-              currency: company.currency,
-              open: finiteNumber(opens[index]),
-              high: finiteNumber(highs[index]),
-              low: finiteNumber(lows[index]),
-              close,
-              adjustedClose: finiteNumber(adjustedClose[index]),
-              volume: finiteNumber(volumes[index]),
-              source: YAHOO_SOURCE,
-              sourceType: "unofficial",
-              sourceUrl: sourceUrl(company.ticker),
-              retrievedAt,
-              provider: "yahoo",
-              dataStatus: "EOD",
-              delaySeconds: null,
-              delayStatus: "NOT_APPLICABLE",
-              marketStatus: "CLOSED",
-              isUnofficial: true,
-              licenseStatus: "UNKNOWN",
-            },
-          ];
+        return parseYahooHistoricalRows({
+          timestamps,
+          opens,
+          highs,
+          lows,
+          closes,
+          adjustedCloses: adjustedClose,
+          volumes,
+          symbol: company.ticker,
+          currency: result.meta.currency,
+          expectedCurrency: company.currency,
+        }).map((row) => {
+          const asOf = new Date(row.epoch * 1000).toISOString();
+          return {
+            id: `${company.ticker}:${asOf}`,
+            companyId: company.id,
+            date: asOf.slice(0, 10),
+            asOf,
+            marketTimestamp: asOf,
+            instrument: company.ticker,
+            exchange: company.exchange,
+            currency: company.currency,
+            open: row.open,
+            high: row.high,
+            low: row.low,
+            close: row.close,
+            adjustedClose: row.adjustedClose,
+            volume: row.volume,
+            source: YAHOO_SOURCE,
+            sourceType: "unofficial",
+            sourceUrl: sourceUrl(company.ticker),
+            retrievedAt,
+            provider: "yahoo",
+            dataStatus: "EOD",
+            delaySeconds: null,
+            delayStatus: "NOT_APPLICABLE",
+            marketStatus: "CLOSED",
+            isUnofficial: true,
+            licenseStatus: "UNKNOWN",
+          };
         });
       },
     );

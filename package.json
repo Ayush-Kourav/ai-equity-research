@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --conditions=react-server --experimental-strip-types --test tests/fundamentals.test.ts tests/gemini-retry.test.ts tests/market-data-provider-selection.test.ts tests/market-data-provider.test.ts tests/research-context.test.ts tests/sec-edgar-fundamentals-provider.test.ts tests/supabase-persistence.test.ts tests/valuation.test.ts"
+    "test": "node --conditions=react-server --experimental-strip-types --test tests/fundamentals.test.ts tests/gemini-retry.test.ts tests/market-data-provider-selection.test.ts tests/market-data-provider.test.ts tests/research-context.test.ts tests/sec-edgar-fundamentals-provider.test.ts tests/supabase-persistence.test.ts tests/valuation.test.ts tests/yahoo-market-data-provider.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

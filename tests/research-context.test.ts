@@ -3,8 +3,10 @@ import test from "node:test";
 import { buildEquityAnalysisPrompt } from "../lib/ai/prompts/equity-analysis.ts";
 import { buildFundamentalsAnalysis } from "../lib/calculations/fundamentals-analysis.ts";
 import { HdfcBankFundamentalsProvider } from "../lib/providers/hdfc-bank-fundamentals-provider.ts";
+import { buildCompanyWithoutMarketData } from "../lib/services/fundamentals-company.ts";
 import { buildResearchContext } from "../lib/services/research-context.ts";
 import type { Company, MarketPrice } from "../lib/types/financial.ts";
+import type { FundamentalsHistory } from "../lib/types/fundamentals.ts";
 
 const company: Company = {
   id: "test:hdfcbank",
@@ -150,4 +152,68 @@ test("builds compact AI context without sending duplicated dashboard payloads", 
     prompt.length < 25_000,
     `AI context should stay bounded: ${prompt.length} characters`,
   );
+});
+
+test("fundamentals-only company identity preserves SEC currency and US market status", () => {
+  const history: FundamentalsHistory = {
+    company: {
+      ticker: "MSFT",
+      companyName: "Microsoft Corporation",
+      exchange: "NASDAQ",
+      companyType: "GENERAL_COMPANY",
+      reportingBasis: "consolidated",
+      currency: "USD",
+    },
+    periods: [],
+    financials: [],
+    bankMetrics: [],
+    growthMetrics: [],
+    provenance: [
+      {
+        id: "sec-msft",
+        source: "SEC EDGAR Form 10-K/20-F XBRL filing",
+        sourceType: "official_company_filing",
+        sourceUrl: "https://www.sec.gov/Archives/edgar/data/",
+        publicationDate: "2026-07-01",
+        retrievedAt: "2026-10-01T00:00:00.000Z",
+        reportingBasis: "consolidated",
+      },
+    ],
+    sourceMode: "SEC_COMPANYFACTS",
+    warnings: [],
+  };
+
+  const company = buildCompanyWithoutMarketData(history);
+  assert.ok(company);
+  assert.equal(company.ticker, "MSFT");
+  assert.equal(company.countryCode, "US");
+  assert.equal(company.currency, "USD");
+  assert.equal(company.exchange, "NASDAQ");
+  assert.equal(company.dataStatus, "UNAVAILABLE");
+  assert.equal(company.marketStatus, "UNKNOWN");
+});
+
+test("fundamentals-only company identity derives Indian currency from metric provenance", async () => {
+  const history = await new HdfcBankFundamentalsProvider().getFundamentals(
+    "HDFCBANK.NS",
+  );
+  assert.ok(history);
+  const company = buildCompanyWithoutMarketData(history);
+  assert.ok(company);
+  assert.equal(company.ticker, "HDFCBANK.NS");
+  assert.equal(company.countryCode, "IN");
+  assert.equal(company.currency, "INR");
+  assert.equal(company.exchange, "NSE");
+});
+
+test("fundamentals-only company identity is unavailable when currency conflicts", async () => {
+  const sourceHistory = await new HdfcBankFundamentalsProvider().getFundamentals(
+    "HDFCBANK.NS",
+  );
+  assert.ok(sourceHistory);
+  const history: FundamentalsHistory = {
+    ...sourceHistory,
+    company: { ...sourceHistory.company, currency: "USD" },
+  };
+  assert.equal(buildCompanyWithoutMarketData(history), null);
 });
