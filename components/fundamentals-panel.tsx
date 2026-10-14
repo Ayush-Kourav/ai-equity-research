@@ -55,6 +55,8 @@ function formatMetric(metric: FundamentalMetric): string {
       return `$${formatted} bn`;
     case "USD_PER_SHARE":
       return `$${formatted}`;
+    case "CURRENCY_PER_SHARE":
+      return `${metric.provenance.currency ?? "Unknown currency"} ${formatted}`;
     case "BILLION_SHARES":
       return `${formatted} bn shares`;
     case "PERCENT":
@@ -95,6 +97,8 @@ function formatFinancialValue(value: FinancialValue): string {
       return `$${formatted} bn`;
     case "USD_PER_SHARE":
       return `$${formatted}`;
+    case "CURRENCY_PER_SHARE":
+      return `${value.currency ?? "Unknown currency"} ${formatted}`;
     case "PERCENT":
       return `${formatted}%`;
     case "MULTIPLE":

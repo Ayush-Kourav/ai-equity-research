@@ -91,6 +91,26 @@ function findMetric(
   );
 }
 
+function currencyForUnit(unit: FinancialValue["unit"]): string | null {
+  if (
+    unit === "USD_BILLION" ||
+    unit === "USD_MILLION" ||
+    unit === "USD_PER_SHARE"
+  ) {
+    return "USD";
+  }
+  if (
+    unit === "PERCENT" ||
+    unit === "CURRENCY_PER_SHARE" ||
+    unit === "CRORE_SHARES" ||
+    unit === "BILLION_SHARES" ||
+    unit === "YEARS"
+  ) {
+    return null;
+  }
+  return "INR";
+}
+
 function unavailableValue(
   id: string,
   unit: FinancialValue["unit"],
@@ -100,22 +120,13 @@ function unavailableValue(
   sourceUrl: string | null,
   retrievedAt: string,
   period: FundamentalPeriod | null = null,
+  currencyOverride?: string | null,
 ): FinancialValue {
   return {
     id,
     value: null,
     unit,
-    currency:
-      unit === "USD_BILLION" ||
-      unit === "USD_MILLION" ||
-      unit === "USD_PER_SHARE"
-        ? "USD"
-        : unit === "PERCENT" ||
-            unit === "CRORE_SHARES" ||
-            unit === "BILLION_SHARES" ||
-            unit === "YEARS"
-          ? null
-          : "INR",
+    currency: currencyOverride ?? currencyForUnit(unit),
     status: "unavailable",
     period,
     source,
@@ -170,7 +181,7 @@ function quoteInput(
   return {
     metricId: "currentPrice",
     value: quote.price,
-    unit: "INR_PER_SHARE",
+    unit: pricePerShareUnit(quote.currency),
     currency: quote.currency,
     period: {
       id: `market-${quote.asOf}`,
@@ -200,7 +211,7 @@ function quoteIsUsable(
     quote.asOf !== null &&
     quote.dataStatus !== "DEMO" &&
       quote.dataStatus !== "UNAVAILABLE" &&
-      quote.currency === "INR" &&
+    quote.currency.trim().length > 0 &&
       Number.isFinite(quote.price) &&
       quote.price > 0,
   );
@@ -284,14 +295,24 @@ function metricValue(
   };
 }
 
+function pricePerShareUnit(currency: string | null | undefined) {
+  if (currency === "INR" || currency === "USD") {
+    return currency === "USD" ? "USD_PER_SHARE" : "INR_PER_SHARE";
+  }
+  return "CURRENCY_PER_SHARE";
+}
+
 function marketPriceValue(
   quote: MarketQuote | null,
   unavailableReason: string,
+  fallbackCurrency: string | null | undefined,
 ): FinancialValue {
+  const currency = quote?.currency ?? fallbackCurrency;
+  const unit = pricePerShareUnit(currency);
   if (!quote || !quoteIsUsable(quote)) {
     return unavailableValue(
       "currentPrice",
-      "INR_PER_SHARE",
+      unit,
       quote?.dataStatus === "DEMO"
         ? "Synthetic demo prices are excluded from valuation calculations."
         : unavailableReason,
@@ -299,12 +320,14 @@ function marketPriceValue(
       "market_data",
       quote?.sourceUrl ?? null,
       quote?.retrievedAt ?? new Date().toISOString(),
+      null,
+      currency,
     );
   }
   return {
     id: "currentPrice",
     value: quote.price,
-    unit: "INR_PER_SHARE",
+    unit,
     currency: quote.currency,
     status: "available",
     period: quoteInput(quote).period,
@@ -356,6 +379,7 @@ function calculateMultiple(
   if (
     denominator.unit !== "INR_PER_SHARE" ||
     denominator.currency !== "INR" ||
+    price.currency !== denominator.currency ||
     denominator.value <= 0
   ) {
     return unavailableValue(
@@ -458,7 +482,11 @@ function valuationInputs(
           calculatedAt: new Date().toISOString(),
         };
   const quoteUsable = Boolean(quote && quoteIsUsable(quote));
-  const currentPrice = marketPriceValue(quote, marketUnavailableReason);
+  const currentPrice = marketPriceValue(
+    quote,
+    marketUnavailableReason,
+    history.company.currency,
+  );
   const eps = metricValue(
     latestAnnualEps,
     "eps",

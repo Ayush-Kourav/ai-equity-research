@@ -12,7 +12,35 @@ import type {
   ResearchMetricContext,
 } from "@/lib/types/research";
 
-const AI_METRIC_IDS = new Set([
+const AI_NON_FINANCIAL_METRIC_IDS = new Set([
+  "revenue",
+  "ebit",
+  "depreciation",
+  "depreciationExpense",
+  "amortizationExpense",
+  "interestExpense",
+  "profitBeforeTax",
+  "incomeTaxExpense",
+  "netIncome",
+  "operatingCashFlow",
+  "capex",
+  "cash",
+  "shortTermDebt",
+  "longTermDebt",
+  "debt",
+  "equity",
+  "dilutedShares",
+  "sharesOutstanding",
+  "workingCapital",
+  "changeInWorkingCapital",
+  "accountsReceivable",
+  "inventory",
+  "accountsPayable",
+  "otherCurrentAssets",
+  "otherCurrentLiabilities",
+]);
+
+const AI_FINANCIAL_INSTITUTION_METRIC_IDS = new Set([
   "profitAfterTax",
   "netInterestIncome",
   "totalDeposits",
@@ -59,6 +87,7 @@ function compactMetric(metric: FundamentalMetric): ResearchMetricContext {
       id: metric.id,
       periodId: metric.periodId,
       status: "unavailable",
+      reason: metric.reason,
     };
   }
 
@@ -97,7 +126,12 @@ function compactFundamentals(
     ...fundamentals.financials,
     ...fundamentals.bankMetrics,
     ...fundamentals.growthMetrics,
-  ].filter((metric) => AI_METRIC_IDS.has(metric.id));
+  ].filter((metric) =>
+    (fundamentals.companyType === "FINANCIAL_INSTITUTION"
+      ? AI_FINANCIAL_INSTITUTION_METRIC_IDS
+      : AI_NON_FINANCIAL_METRIC_IDS
+    ).has(metric.id),
+  );
   const seen = new Set<string>();
   const metrics = selectedMetrics.filter((metric) => {
     const key = `${metric.periodId}:${metric.id}`;

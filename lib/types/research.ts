@@ -9,6 +9,7 @@ interface ResearchMetricContextBase {
 export type ResearchMetricContext =
   | (ResearchMetricContextBase & {
       status: "unavailable";
+      reason: string;
     })
   | (ResearchMetricContextBase & {
       status: "reported";

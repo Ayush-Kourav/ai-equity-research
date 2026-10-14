@@ -11,6 +11,7 @@ export type FundamentalUnit =
   | "USD_BILLION"
   | "INR_PER_SHARE"
   | "USD_PER_SHARE"
+  | "CURRENCY_PER_SHARE"
   | "CRORE_SHARES"
   | "BILLION_SHARES"
   | "PERCENT"

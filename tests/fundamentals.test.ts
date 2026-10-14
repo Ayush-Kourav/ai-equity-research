@@ -516,6 +516,13 @@ test("calculates P/E and P/B only from supplied market price and verified share 
   assert.equal(analysis.valuationInputs.pe.inputs?.length, 2);
   assert.equal(analysis.valuationInputs.pb.inputs?.length, 2);
 
+  const usdQuote = { ...quote, currency: "USD" };
+  const usdQuoteAnalysis = buildFundamentalsAnalysis(valuationHistory, usdQuote);
+  assert.equal(usdQuoteAnalysis.valuationInputs.currentPrice.unit, "USD_PER_SHARE");
+  assert.equal(usdQuoteAnalysis.valuationInputs.currentPrice.currency, "USD");
+  assert.equal(usdQuoteAnalysis.valuationInputs.pe.status, "unavailable");
+  assert.equal(usdQuoteAnalysis.valuationInputs.pb.status, "unavailable");
+
   const zeroEps = reportedMetric(
     "basicEps",
     "fy2025-26",
