@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Company, MarketPrice } from "../lib/types/financial.ts";
-import { SupabaseDatabaseRepository } from "../lib/repositories/supabase-database-repository.ts";
-import { createSupabasePersistenceClient } from "../lib/supabase/persistence-client-options.ts";
+import {
+  classifySupabaseHealthFailure,
+  SupabaseDatabaseError,
+  SupabaseDatabaseRepository,
+} from "../lib/repositories/supabase-database-repository.ts";
+import {
+  createSupabasePersistenceClient,
+  SupabasePersistenceConfigurationError,
+} from "../lib/supabase/persistence-client-options.ts";
 import type { createSupabasePersistenceServerClient } from "../lib/supabase/persistence-server.ts";
 import { runBestEffortPersistence } from "../lib/services/persistence-logging.ts";
 
@@ -105,14 +112,21 @@ function failedWrite(): Promise<never> {
   );
 }
 
-function fakePersistenceClient(failAt?: string): {
+function fakePersistenceClient(
+  failAt?: string,
+  failureCode = "42501",
+  failureStatus?: number,
+): {
   client: PersistenceClient;
   calls: string[];
 } {
   const calls: string[] = [];
   const fail = (table: string, operation: string) =>
     failAt === `${table}:${operation}`
-      ? Object.assign(new Error(secretSentinels.join(" ")), { code: "42501" })
+      ? Object.assign(new Error(secretSentinels.join(" ")), {
+          code: failureCode,
+          ...(failureStatus === undefined ? {} : { status: failureStatus }),
+        })
       : null;
   const client = {
     from(table: string) {
@@ -267,6 +281,125 @@ test("privileged Supabase client uses the server URL and secret key with session
       },
     },
   });
+});
+
+test("Supabase persistence client rejects malformed project URLs without exposing configuration", () => {
+  assert.throws(
+    () =>
+      createSupabasePersistenceClient(
+        {
+          NEXT_PUBLIC_SUPABASE_URL: "not-a-url",
+          SUPABASE_SECRET_KEY: "a-present-but-unprinted-secret",
+        },
+        () => ({ created: true }),
+      ),
+    (error: unknown) =>
+      error instanceof SupabasePersistenceConfigurationError &&
+      error.failure === "invalid_configuration" &&
+      !error.message.includes("a-present-but-unprinted-secret"),
+  );
+});
+
+test("Supabase health failures distinguish missing schema, access, and service availability", () => {
+  assert.equal(
+    classifySupabaseHealthFailure({ code: "42P01" }),
+    "migration_not_applied",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({ code: "PGRST205" }),
+    "migration_not_applied",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({ code: "42501" }),
+    "access_denied",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({ status: 503 }),
+    "upstream_unavailable",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure(new TypeError("fetch failed")),
+    "upstream_unavailable",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure(
+      Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("lookup failed"), {
+          code: "ENOTFOUND",
+        }),
+      }),
+    ),
+    "upstream_unavailable",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({ message: "fetch failed: connection reset" }),
+    "upstream_unavailable",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({
+      message: "relation public.companies does not exist",
+    }),
+    "migration_not_applied",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({ message: "permission denied for table companies" }),
+    "access_denied",
+  );
+  assert.equal(
+    classifySupabaseHealthFailure({ code: "" }),
+    "query_failed",
+  );
+});
+
+test("Supabase health uses a bounded server-side table probe", async () => {
+  const { client, calls } = fakePersistenceClient();
+  const repository = new SupabaseDatabaseRepository(async () => client);
+  const result = await repository.checkConnection();
+
+  assert.ok(Number.isFinite(Date.parse(result.checkedAt)));
+  assert.deepEqual(calls, ["companies:SELECT"]);
+});
+
+test("Supabase health reports a missing migration without returning upstream details", async () => {
+  const { client } = fakePersistenceClient("companies:SELECT", "42P01");
+  const repository = new SupabaseDatabaseRepository(async () => client);
+
+  await assert.rejects(
+    repository.checkConnection(),
+    (error: unknown) =>
+      error instanceof SupabaseDatabaseError &&
+      error.failure === "migration_not_applied" &&
+      error.message.includes("Apply the existing project migration") &&
+      secretSentinels.every((secret) => !error.message.includes(secret)),
+  );
+});
+
+test("Supabase health reports access failures without returning raw provider errors", async () => {
+  const { client } = fakePersistenceClient(
+    "companies:SELECT",
+    "42501",
+  );
+  const repository = new SupabaseDatabaseRepository(async () => client);
+
+  await assert.rejects(
+    repository.checkConnection(),
+    (error: unknown) =>
+      error instanceof SupabaseDatabaseError &&
+      error.failure === "access_denied" &&
+      secretSentinels.every((secret) => !error.message.includes(secret)),
+  );
+});
+
+test("Supabase health distinguishes missing server credentials", async () => {
+  const repository = new SupabaseDatabaseRepository(async () => {
+    throw new SupabasePersistenceConfigurationError();
+  });
+  await assert.rejects(
+    repository.checkConnection(),
+    (error: unknown) =>
+      error instanceof SupabaseDatabaseError &&
+      error.failure === "not_configured",
+  );
 });
 
 test("company and historical price persistence use the privileged client successfully", async () => {

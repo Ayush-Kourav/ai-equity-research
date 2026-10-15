@@ -1,6 +1,12 @@
 export type GeminiFailure =
   | "not_configured"
+  | "authentication_failed"
+  | "permission_denied"
+  | "quota_exceeded"
   | "rate_limited"
+  | "invalid_request"
+  | "unsupported_model"
+  | "network_error"
   | "invalid_response"
   | "unavailable"
   | "timeout";
@@ -23,38 +29,110 @@ function getErrorStatus(error: unknown): number | null {
   if (!isRecord(error)) {
     return null;
   }
-  if (typeof error.status === "number") {
-    return error.status;
+  for (const value of [error.status, error.statusCode, error.code]) {
+    if (typeof value === "number") {
+      return value;
+    }
+    if (typeof value === "string" && /^\d{3}$/.test(value)) {
+      return Number(value);
+    }
   }
-  if (typeof error.status === "string" && /^\d{3}$/.test(error.status)) {
-    return Number(error.status);
-  }
-  if (typeof error.code === "number") {
-    return error.code;
-  }
-  if (typeof error.code === "string" && /^\d{3}$/.test(error.code)) {
-    return Number(error.code);
+  if (isRecord(error.error)) {
+    return getErrorStatus(error.error);
   }
   return null;
 }
 
-function isAbortError(error: unknown): boolean {
-  return (
-    isRecord(error) &&
-    (error.name === "AbortError" ||
-      error.code === 20 ||
-      error.code === "ABORT_ERR")
-  );
+function safeErrorText(error: unknown): string {
+  if (!isRecord(error)) {
+    return "";
+  }
+  const fields = [error.status, error.code, error.message];
+  if (isRecord(error.error)) {
+    fields.push(
+      error.error.status,
+      error.error.code,
+      error.error.message,
+    );
+  }
+  return fields
+    .filter((value): value is string | number => (
+      typeof value === "string" || typeof value === "number"
+    ))
+    .join(" ")
+    .toLowerCase();
+}
+
+function isTimeoutError(error: unknown): boolean {
+  if (!isRecord(error)) {
+    return false;
+  }
+  if (
+    error.name === "AbortError" ||
+    error.name === "APIConnectionTimeoutError" ||
+    error.code === "ABORT_ERR" ||
+    error.code === 20
+  ) {
+    return true;
+  }
+  return isRecord(error.cause) && isTimeoutError(error.cause);
+}
+
+function isNetworkError(error: unknown, depth = 0): boolean {
+  if (!isRecord(error) || depth > 4) {
+    return false;
+  }
+  if (
+    error.name === "APIConnectionError" ||
+    (typeof error.code === "string" &&
+      ["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "ETIMEDOUT"].includes(
+        error.code,
+      ))
+  ) {
+    return true;
+  }
+  return isNetworkError(error.cause, depth + 1);
 }
 
 export function classifyGeminiFailure(error: unknown): GeminiFailure {
-  if (getErrorStatus(error) === 429) {
-    return "rate_limited";
-  }
-  if (isAbortError(error)) {
+  const status = getErrorStatus(error);
+  const errorText = safeErrorText(error);
+  if (isTimeoutError(error) || status === 408 || status === 504) {
     return "timeout";
   }
-  if (error instanceof SyntaxError) {
+  if (isNetworkError(error)) {
+    return "network_error";
+  }
+  if (status === 401 || /\b(unauthenticated|invalid api key|api_key_invalid)\b/.test(errorText)) {
+    return "authentication_failed";
+  }
+  if (status === 403 || /\b(permission_denied|access denied|api disabled)\b/.test(errorText)) {
+    return "permission_denied";
+  }
+  if (
+    status === 402 ||
+    /\b(quota_exceeded|resource_exhausted|billing|quota)\b/.test(errorText)
+  ) {
+    return "quota_exceeded";
+  }
+  if (
+    /\b(model_not_found|model .*not found|models\/.*not found|unsupported model|model is not supported|model .* unavailable)\b/.test(errorText)
+  ) {
+    return "unsupported_model";
+  }
+  if (status === 429) {
+    return "rate_limited";
+  }
+  if (status === 404) {
+    return "unsupported_model";
+  }
+  if (status === 400 || /\b(invalid_argument|invalid_request|bad request)\b/.test(errorText)) {
+    return "invalid_request";
+  }
+  if (
+    error instanceof SyntaxError ||
+    (isRecord(error) && error.name === "SyntaxError")
+  ) {
     return "invalid_response";
   }
   return "unavailable";
@@ -66,8 +144,20 @@ export function createGeminiProviderError(
   const failure = classifyGeminiFailure(error);
   let message = "Gemini analysis is unavailable.";
 
-  if (failure === "rate_limited") {
+  if (failure === "authentication_failed") {
+    message = "Gemini rejected server authentication. Check the server-side API key.";
+  } else if (failure === "permission_denied") {
+    message = "The configured Gemini project or key is not permitted to use this API.";
+  } else if (failure === "quota_exceeded") {
+    message = "Gemini quota or billing limits have been reached.";
+  } else if (failure === "rate_limited") {
     message = "Gemini rate limit reached. Please wait before trying again.";
+  } else if (failure === "invalid_request") {
+    message = "Gemini rejected the request configuration. Check the model and supported generation settings.";
+  } else if (failure === "unsupported_model") {
+    message = "The configured Gemini model is unavailable. Set GEMINI_MODEL to an enabled text-generation model.";
+  } else if (failure === "network_error") {
+    message = "The server could not connect to Gemini. Check outbound network and DNS connectivity.";
   } else if (failure === "timeout") {
     message = "Gemini analysis timed out after 90 seconds. Please try again.";
   } else if (failure === "invalid_response") {

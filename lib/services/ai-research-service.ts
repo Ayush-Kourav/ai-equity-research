@@ -18,12 +18,12 @@ import type {
 import type { FundamentalsAnalysis } from "@/lib/types/fundamentals";
 
 /*
- * Current production Flash model.
+ * A documented text-generation model with free-tier availability.
  *
  * Gemini API keys do NOT contain the model name.
  * The model is selected separately through GEMINI_MODEL.
  */
-const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
 function stripRetrievalTimestamps(value: unknown): unknown {
   if (Array.isArray(value)) {

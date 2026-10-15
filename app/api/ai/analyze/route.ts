@@ -16,15 +16,28 @@ let lastRequestAt = 0;
 function statusForGeminiError(error: GeminiProviderError): number {
   switch (error.failure) {
     case "not_configured":
+    case "authentication_failed":
+    case "permission_denied":
+    case "quota_exceeded":
+    case "unsupported_model":
+    case "network_error":
       return 503;
     case "rate_limited":
       return 429;
+    case "timeout":
+      return 504;
+    case "invalid_request":
     case "invalid_response":
-    case "unavailable":
       return 502;
+    case "unavailable":
+      return 503;
     default:
       return 502;
   }
+}
+
+function categoryForGeminiFailure(error: GeminiProviderError): string {
+  return `GEMINI_${error.failure.toUpperCase()}`;
 }
 
 export async function GET() {
@@ -32,7 +45,7 @@ export async function GET() {
   return Response.json({
     status: configured ? "configured" : "not_configured",
     configured,
-    model: analysisService.getModelName(),
+    provider: "google-gemini",
   });
 }
 
@@ -174,7 +187,7 @@ export async function POST(request: Request) {
         {
           status: "request_failed",
           code: `gemini_${error.failure}`,
-          category: "GEMINI_REQUEST_FAILED",
+          category: categoryForGeminiFailure(error),
           error: error.message,
         },
         { status: statusForGeminiError(error) },

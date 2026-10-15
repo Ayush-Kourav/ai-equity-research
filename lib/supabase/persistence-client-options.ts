@@ -20,11 +20,30 @@ export interface SupabasePersistenceClientFactory<TClient> {
 }
 
 export class SupabasePersistenceConfigurationError extends Error {
-  constructor() {
+  readonly failure: "not_configured" | "invalid_configuration";
+
+  constructor(
+    failure: "not_configured" | "invalid_configuration" = "not_configured",
+  ) {
     super(
-      "Supabase persistence is not configured. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY on the server.",
+      failure === "not_configured"
+        ? "Supabase persistence is not configured. Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY on the server."
+        : "Supabase URL configuration is invalid. Use an HTTP(S) Supabase project URL.",
     );
     this.name = "SupabasePersistenceConfigurationError";
+    this.failure = failure;
+  }
+}
+
+function isValidSupabaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      Boolean(url.hostname)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -37,6 +56,9 @@ export function createSupabasePersistenceClient<TClient>(
 
   if (!supabaseUrl || !secretKey) {
     throw new SupabasePersistenceConfigurationError();
+  }
+  if (!isValidSupabaseUrl(supabaseUrl)) {
+    throw new SupabasePersistenceConfigurationError("invalid_configuration");
   }
 
   return clientFactory(supabaseUrl, secretKey, {

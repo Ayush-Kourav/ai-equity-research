@@ -34,8 +34,16 @@ export async function GET(
 
   if (!fundamentals) {
     return Response.json(
-      { error: "Official fundamentals are currently available only for HDFC Bank." },
-      { status: 404 },
+      {
+        error: "Verified fundamentals are not available for this company.",
+        code: "fundamentals_not_supported",
+        ticker,
+        dataStatus: "UNAVAILABLE",
+      },
+      {
+        status: 404,
+        headers: { "Cache-Control": "no-store" },
+      },
     );
   }
 

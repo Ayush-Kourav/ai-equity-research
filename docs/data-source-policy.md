@@ -5,7 +5,7 @@ This policy applies to market prices, company metadata, financial statements, ra
 ## 1. Provider selection and failure behavior
 
 - Market data is disabled unless the server explicitly sets `MARKET_DATA_PROVIDER`.
-- Current supported choices are `unavailable`, `demo`, and `yahoo`. Named future adapters such as Upstox, Angel One, Twelve Data, and FYERS return an explicit not-implemented error until an adapter exists.
+- Current provider choices are `unavailable`, `demo`, `yahoo`, and `fyers`. The FYERS adapter is subject to the production display and data-use approval gates; those gates must not be bypassed. Named future adapters such as Upstox, Angel One, and Twelve Data return an explicit not-implemented error until an adapter exists.
 - Never switch providers silently, especially never from a failed live request to demo data.
 - An invalid symbol, unsupported company, upstream error, missing credential, or unapproved license must remain an explicit error/unavailable state; it must not become a plausible-looking number.
 - Demo data is synthetic, for local development only, and may not be used as a research input or served in production.
@@ -32,7 +32,8 @@ Missing, conflicting, unsupported, or incompatible inputs stay null/unavailable 
 - Store official company financial facts only with their provenance, reporting basis, unit/currency, and period. Apply a documented retention policy before adding a database write path.
 - HDFC Bank fundamentals are currently a curated, code-bundled snapshot of official disclosures, not a live filing fetch. The API labels this as historical and reports period/source coverage and missing-data limitations. Only HDFC Bank is supported by that fundamentals source; other companies must remain unavailable until a verified provider is implemented.
 - Keep market quotes and short-lived provider responses dynamic unless a reviewed provider contract permits a defined cache.
-- Do not apply the existing Supabase migration or enable a Supabase client until policies, server-side access, grants, and provenance constraints are reviewed.
+- Supabase health and persistence use the server-only privileged client. The health probe performs a bounded read from `companies`; it does not write data or change RLS. The existing migration enables RLS but declares no policies, so do not expose table access through a publishable key or add anonymous/authenticated grants without a least-privilege policy review.
+- The repository contains `supabase/migrations/20260928000000_phase2_foundation.sql`, but local migration presence does not prove it has been applied remotely. The health probe can confirm whether its `companies` table is present; migration history still requires a Supabase-side check.
 
 ## 5. User-interface requirements
 
@@ -66,4 +67,4 @@ Record evidence and date in [data-provider-compliance.md](./data-provider-compli
 
 ## 8. Supabase and deployment security
 
-The current Supabase migration enables RLS but defines no policies, and no client/project is configured. Do not apply it or add browser access until least-privilege policies have been designed. Treat service-role credentials as privileged server-only secrets. Before public deployment, add durable abuse controls for market/AI routes; the current AI throttle is process-local and does not protect a multi-instance deployment.
+The current Supabase migration enables RLS but defines no policies. The production health probe currently fails with a network/DNS category, so remote migration status and database access have not been confirmed. Do not apply the migration or add browser access until least-privilege policies have been designed. Treat service-role credentials as privileged server-only secrets. Before public deployment, add durable abuse controls for market/AI routes; the current AI throttle is process-local and does not protect a multi-instance deployment.

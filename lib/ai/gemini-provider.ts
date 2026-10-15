@@ -1,6 +1,6 @@
 import "server-only";
 
-import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import type { AIProvider } from "@/lib/ai/ai-provider";
 import {
   createGeminiProviderError,
@@ -37,6 +37,9 @@ function getErrorStatus(error: unknown): number | null {
   if (typeof error.status === "number") {
     return error.status;
   }
+  if (typeof error.statusCode === "number") {
+    return error.statusCode;
+  }
   if (typeof error.status === "string" && /^\d{3}$/.test(error.status)) {
     return Number(error.status);
   }
@@ -49,6 +52,35 @@ function getErrorStatus(error: unknown): number | null {
   }
 
   return null;
+}
+
+function getSafeProviderCode(error: unknown): string | null {
+  if (!isRecord(error)) {
+    return null;
+  }
+  const allowedCodes = new Set([
+    "INVALID_ARGUMENT",
+    "INVALID_REQUEST",
+    "UNAUTHENTICATED",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION",
+    "NOT_FOUND",
+    "UNAVAILABLE",
+    "DEADLINE_EXCEEDED",
+  ]);
+  const candidates = [
+    error.code,
+    error.status,
+    isRecord(error.error) ? error.error.status : null,
+    isRecord(error.error) ? error.error.code : null,
+  ];
+  return (
+    candidates.find(
+      (value): value is string =>
+        typeof value === "string" && allowedCodes.has(value.toUpperCase()),
+    ) ?? null
+  );
 }
 
 export class GeminiProvider implements AIProvider {
@@ -66,9 +98,7 @@ export class GeminiProvider implements AIProvider {
     context: string,
   ): Promise<EquityAnalysis> {
     try {
-      console.log(
-        `[GeminiProvider] Sending request to model: ${this.modelName}`,
-      );
+      console.log("[GeminiProvider] Sending analysis request.");
 
       const response = await withGeminiTransientRetries((timeoutMs) =>
         this.client.models.generateContent({
@@ -76,15 +106,6 @@ export class GeminiProvider implements AIProvider {
         contents: context,
         config: {
           systemInstruction: EQUITY_ANALYSIS_SYSTEM_PROMPT,
-
-          /*
-           * Gemini 3 models are reasoning models.
-           * Low thinking keeps the equity-analysis response fast
-           * while still allowing structured reasoning.
-           */
-          thinkingConfig: {
-             thinkingLevel: ThinkingLevel.LOW,
-          },
 
           /*
            * Keep output controlled so the request remains
@@ -177,9 +198,7 @@ export class GeminiProvider implements AIProvider {
         }),
       );
 
-      console.log(
-        `[GeminiProvider] Gemini response received from ${this.modelName}`,
-      );
+      console.log("[GeminiProvider] Analysis response received.");
 
       const text = response.text;
 
@@ -193,6 +212,10 @@ export class GeminiProvider implements AIProvider {
       return parseGeminiAnalysis(text);
     } catch (error) {
       if (error instanceof GeminiProviderError) {
+        console.error("[GeminiProvider] Analysis validation failed.", {
+          failure: error.failure,
+          reason: error.message,
+        });
         throw error;
       }
 
@@ -200,6 +223,7 @@ export class GeminiProvider implements AIProvider {
       console.error("[GeminiProvider] Request failed.", {
         failure: structuredError.failure,
         status: getErrorStatus(error),
+        providerCode: getSafeProviderCode(error),
         errorName: error instanceof Error ? error.name : "unknown",
       });
       throw structuredError;

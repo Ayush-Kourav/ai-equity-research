@@ -23,8 +23,13 @@ export async function GET() {
           status: "unavailable",
           code: error.failure,
           error: error.message,
+          upstreamStatus: error.upstreamStatus,
         },
-        { status: error.failure === "not_configured" ? 503 : 502 },
+        {
+          status:
+            error.failure === "query_failed" ? 502 : 503,
+          headers: { "Cache-Control": "no-store" },
+        },
       );
     }
 

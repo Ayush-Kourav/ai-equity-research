@@ -113,6 +113,71 @@ test("Gemini failure classification leaves temporary 503 as unavailable", () => 
   );
 });
 
+test("Gemini classifies authentication, permission, quota and model errors without exposing upstream text", () => {
+  const cases = [
+    [
+      Object.assign(new Error("secret-like upstream text"), { status: 401 }),
+      "authentication_failed",
+    ],
+    [
+      Object.assign(new Error("permission denied"), { status: 403 }),
+      "permission_denied",
+    ],
+    [
+      Object.assign(new Error("RESOURCE_EXHAUSTED quota exceeded"), { status: 429 }),
+      "quota_exceeded",
+    ],
+    [
+      Object.assign(new Error("too many requests"), { status: 429 }),
+      "rate_limited",
+    ],
+    [
+      Object.assign(new Error("Requested model was not found"), { status: 404 }),
+      "unsupported_model",
+    ],
+    [
+      Object.assign(new Error("The configured model is unavailable"), { status: 503 }),
+      "unsupported_model",
+    ],
+    [
+      Object.assign(new Error("invalid generation parameter"), { status: 400 }),
+      "invalid_request",
+    ],
+  ] as const;
+
+  for (const [upstreamError, expectedFailure] of cases) {
+    const providerError = createGeminiProviderError(upstreamError);
+    assert.equal(providerError.failure, expectedFailure);
+    assert.ok(!providerError.message.includes("secret-like"));
+    assert.ok(!providerError.message.includes("upstream text"));
+  }
+});
+
+test("Gemini classifies SDK timeouts separately from upstream availability", () => {
+  assert.equal(
+    classifyGeminiFailure(
+      Object.assign(new Error("timeout"), {
+        name: "APIConnectionTimeoutError",
+      }),
+    ),
+    "timeout",
+  );
+  assert.equal(
+    classifyGeminiFailure(
+      Object.assign(new Error("service unavailable"), { status: 503 }),
+    ),
+    "unavailable",
+  );
+  assert.equal(
+    classifyGeminiFailure(
+      Object.assign(new Error("connection failed"), {
+        name: "APIConnectionError",
+      }),
+    ),
+    "network_error",
+  );
+});
+
 test("exhausted Gemini 503 retries produce the structured provider error", async () => {
   let attempts = 0;
   await assert.rejects(

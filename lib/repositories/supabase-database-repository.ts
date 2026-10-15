@@ -8,21 +8,30 @@ import {
   persistenceErrorCode,
   type PersistenceFailureContext,
 } from "../services/persistence-logging.ts";
+import { SupabasePersistenceConfigurationError } from "../supabase/persistence-client-options.ts";
 import type { createSupabasePersistenceServerClient } from "../supabase/persistence-server.ts";
 
 export type SupabaseDatabaseFailure =
   | "not_configured"
+  | "invalid_configuration"
   | "migration_not_applied"
   | "access_denied"
+  | "upstream_unavailable"
   | "query_failed";
 
 export class SupabaseDatabaseError extends Error {
   readonly failure: SupabaseDatabaseFailure;
+  readonly upstreamStatus: number | null;
 
-  constructor(message: string, failure: SupabaseDatabaseFailure) {
+  constructor(
+    message: string,
+    failure: SupabaseDatabaseFailure,
+    upstreamStatus: number | null = null,
+  ) {
     super(message);
     this.name = "SupabaseDatabaseError";
     this.failure = failure;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
@@ -43,27 +52,173 @@ type PersistenceClient = ReturnType<
   typeof createSupabasePersistenceServerClient
 >;
 
-function classifyQueryFailure(code: string | undefined): SupabaseDatabaseFailure {
+function errorCode(error: unknown): string | null {
+  if (!isRecord(error)) {
+    return null;
+  }
+  const code = error.code;
+  if (
+    typeof code === "string" &&
+    (/^[0-9A-Z]{5}$/.test(code) || /^PGRST\d{3}$/.test(code))
+  ) {
+    return code;
+  }
+  if (isRecord(error.error)) {
+    return errorCode(error.error);
+  }
+  return null;
+}
+
+function errorStatus(error: unknown): number | null {
+  if (!isRecord(error)) {
+    return null;
+  }
+  for (const value of [error.status, error.statusCode]) {
+    if (typeof value === "number" && value >= 100 && value <= 599) {
+      return value;
+    }
+    if (
+      typeof value === "string" &&
+      /^\d{3}$/.test(value) &&
+      Number(value) >= 100 &&
+      Number(value) <= 599
+    ) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function networkErrorCode(error: unknown, depth = 0): string | null {
+  if (!isRecord(error) || depth > 4) {
+    return null;
+  }
+  const code = error.code;
+  if (
+    typeof code === "string" &&
+    ["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "ETIMEDOUT"].includes(code)
+  ) {
+    return code;
+  }
+  return networkErrorCode(error.cause, depth + 1);
+}
+
+export function classifySupabaseHealthFailure(
+  error: unknown,
+): SupabaseDatabaseFailure {
+  const code = errorCode(error);
   if (code === "42P01" || code === "PGRST205") {
     return "migration_not_applied";
   }
   if (code === "42501" || code === "PGRST301") {
     return "access_denied";
   }
+  const status = errorStatus(error);
+  if (status === 401 || status === 403) {
+    return "access_denied";
+  }
+  if ((status !== null && status >= 500) || status === 408 || status === 429) {
+    return "upstream_unavailable";
+  }
+  if (
+    error instanceof TypeError ||
+    networkErrorCode(error) !== null ||
+    (isRecord(error) &&
+      (error.name === "AbortError" ||
+        error.name === "TimeoutError"))
+  ) {
+    return "upstream_unavailable";
+  }
+  const diagnosticText = [
+    isRecord(error) ? error.message : null,
+    isRecord(error) && isRecord(error.error) ? error.error.message : null,
+    isRecord(error) && isRecord(error.cause) ? error.cause.message : null,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  if (
+    /\b(fetch failed|network|connection (?:refused|reset|timed out)|dns|timeout|timed out|econnrefused|econnreset|enotfound|etimedout)\b/.test(
+      diagnosticText,
+    )
+  ) {
+    return "upstream_unavailable";
+  }
+  if (
+    /\b(relation .* does not exist|table .* not found|schema cache.*not.*companies)\b/.test(
+      diagnosticText,
+    )
+  ) {
+    return "migration_not_applied";
+  }
+  if (/\b(permission denied|not authorized|access denied)\b/.test(diagnosticText)) {
+    return "access_denied";
+  }
   return "query_failed";
+}
+
+function safeDiagnosticFields(error: unknown): string[] {
+  if (!isRecord(error)) {
+    return [];
+  }
+  const allowedFields = new Set([
+    "code",
+    "status",
+    "statusCode",
+    "message",
+    "details",
+    "hint",
+    "name",
+    "cause",
+    "error",
+  ]);
+  return Object.keys(error).filter((key) => allowedFields.has(key)).sort();
 }
 
 function failureMessage(failure: SupabaseDatabaseFailure): string {
   switch (failure) {
     case "not_configured":
-      return "Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY.";
+      return "Supabase server persistence is not configured. Set the project URL and server-only secret key.";
+    case "invalid_configuration":
+      return "The configured Supabase project URL is invalid.";
     case "migration_not_applied":
-      return "The Supabase companies table is unavailable. Apply the existing project migration.";
+      return "The Supabase companies table is unavailable. Apply the existing project migration after review.";
     case "access_denied":
-      return "Supabase denied access to the companies table. Review grants and row-level security policies.";
+      return "Supabase denied the server health check. Review the server key permissions and database grants.";
+    case "upstream_unavailable":
+      return "Supabase could not be reached. Check project availability and network connectivity.";
     case "query_failed":
-      return "The Supabase database query failed.";
+      return "The Supabase health query failed. Check server diagnostics for the safe error category.";
   }
+}
+
+function safeErrorCode(error: unknown): string {
+  return errorCode(error) ?? "none";
+}
+
+function databaseError(
+  error: unknown,
+  operation: string,
+): SupabaseDatabaseError {
+  const failure = classifySupabaseHealthFailure(error);
+  const upstreamStatus = errorStatus(error);
+  console.error(`[supabase] ${operation} failed.`, {
+    failure,
+    postgresErrorCode: safeErrorCode(error),
+    upstreamStatus,
+    networkErrorCode: networkErrorCode(error),
+    errorName: error instanceof Error ? error.name : "unknown",
+    diagnosticFields: safeDiagnosticFields(error),
+  });
+  return new SupabaseDatabaseError(
+    failureMessage(failure),
+    failure,
+    upstreamStatus,
+  );
 }
 
 export class SupabaseDatabaseRepository {
@@ -329,33 +484,33 @@ export class SupabaseDatabaseRepository {
   }
 
   async checkConnection(): Promise<{ checkedAt: string }> {
-    const { createSupabaseServerClient, SupabaseConfigurationError } =
-      await import("../supabase/server.ts");
-    let client: Awaited<ReturnType<typeof createSupabaseServerClient>>;
+    let client: PersistenceClient;
     try {
-      client = await createSupabaseServerClient();
+      client = await this.createPersistenceClient();
     } catch (error) {
-      if (error instanceof SupabaseConfigurationError) {
+      if (error instanceof SupabasePersistenceConfigurationError) {
         throw new SupabaseDatabaseError(
-          failureMessage("not_configured"),
-          "not_configured",
+          failureMessage(error.failure),
+          error.failure,
         );
       }
-      throw error;
+      throw databaseError(error, "Database health client initialization");
     }
 
-    const { error } = await client
-      .from("companies")
-      .select("id")
-      .limit(1);
-
-    if (error) {
-      const failure = classifyQueryFailure(error.code);
-      console.error("[supabase] Database health query failed.", {
-        failure,
-        code: error.code,
-      });
-      throw new SupabaseDatabaseError(failureMessage(failure), failure);
+    try {
+      const { error } = await client
+        .from("companies")
+        .select("id")
+        .limit(1)
+        .maybeSingle();
+      if (error) {
+        throw databaseError(error, "Database health query");
+      }
+    } catch (error) {
+      if (error instanceof SupabaseDatabaseError) {
+        throw error;
+      }
+      throw databaseError(error, "Database health query");
     }
 
     return { checkedAt: new Date().toISOString() };
